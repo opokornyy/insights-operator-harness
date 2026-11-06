@@ -3,6 +3,12 @@
 Everything below was verified against live infrastructure on 2026-10-16. Where an
 endpoint is known to be unavailable, that is recorded too — don't retry it.
 
+Investigation now goes through the `openshift-ci-mcp` MCP server (see
+`SKILL.md`'s Tooling table) rather than scraping these endpoints directly. This
+reference stays for background on the underlying artifact layout — useful when
+reading an MCP tool's output. There is no scripted fallback if the MCP server
+is unavailable; the skill stops rather than scraping these endpoints by hand.
+
 ## Data sources: what works anonymously
 
 | Source | URL | Works without auth? |
@@ -18,8 +24,9 @@ endpoint is known to be unavailable, that is recorded too — don't retry it.
 | `gsutil` / `gcloud storage` | `gs://test-platform-results/…` | Only after `gcloud auth login`; credentials in this workspace were expired. Not needed — use the public bucket. |
 
 **Key point:** spyglass URLs usually name the *private* `test-platform-results`
-bucket, but the same object path exists in `test-platform-results-public`. Swap
-the bucket name and fetch anonymously. `scripts/prowjob.py` does this for you.
+bucket, but the same object path exists in `test-platform-results-public`. The
+MCP server's `get_prow_*` tools handle this resolution for you — pass them the
+spyglass URL or job/build-id directly.
 
 ## Build artifact layout
 
@@ -54,8 +61,9 @@ Inside a build:
 | `artifacts/<test-name>/gather-extra/artifacts/` | cluster dump: `clusteroperators.json`, `pods.json`, `events.json`, audit logs |
 | `artifacts/<test-name>/gather-must-gather/` | must-gather tarball and `junit_install.xml` |
 
-A single e2e build holds ~8000 objects, so always list with pagination
-(`nextPageToken`) and filter — `prowjob.py ls --grep` handles this.
+A single e2e build holds ~8000 objects, so always filter when listing — use
+`get_prow_artifacts`, which handles pagination, and narrow with a path/grep
+rather than listing everything.
 
 ## Branch naming — do not assume
 
