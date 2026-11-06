@@ -28,6 +28,13 @@ git submodule update --remote projects/<name>
 - [ARCHITECTURE.md](ARCHITECTURE.md) — component overview and subsystem descriptions
 - [development/CONTRIBUTING.md](development/CONTRIBUTING.md) — how to add features, test changes on a cluster, and run integration tests
 
+## Skills
+
+Harness-wide Claude Code skills live under `.agents/skills/` (project-specific
+skills live under `projects/<name>/.claude/skills/`):
+
+- [prow-failure-investigator](.agents/skills/prow-failure-investigator/SKILL.md) — triage a failed OpenShift Prow CI job for insights-operator / insights-runtime-extractor: flake vs. regression, suspect commit, root cause trace into gatherer code. Requires the [`openshift-ci-mcp`](https://github.com/openshift-eng/openshift-ci-mcp) MCP server to be registered with Claude Code (`claude mcp list` to check); there is no fallback if it's unavailable
+
 ## Links
 
 - **Documentation:** https://ccx.pages.redhat.com/ccx-docs/
