@@ -18,26 +18,29 @@ artifact layout, branch names per repo, job names, and which endpoints are dead.
 
 ## Tooling
 
-`scripts/prowjob.py` reads the anonymously-public `test-platform-results-public`
-bucket. Stdlib only, no auth, no `gcloud login`.
+Use the `openshift-ci-mcp` MCP server's tools — no `gcloud login`, no anonymous
+bucket scraping. It must already be registered with Claude Code
+(`claude mcp list` to check; see https://github.com/openshift-eng/openshift-ci-mcp
+for setup if it is missing). There is no fallback: if its tools are not
+available, say so and stop rather than hand-scraping the bucket URLs in
+`references/ci-layout.md` or inventing data.
 
-```bash
-S=.agents/skills/prow-failure-investigator/scripts/prowjob.py
+| Need | Tool | Notes |
+|---|---|---|
+| Job identity: refs, base_sha, PR sha, result | `get_prow_job_run` | Takes a job name + build ID, or a Prow URL. Also returns per-step pass/fail. |
+| Failing step | `get_prow_job_run` | Same call — read the per-step results, don't call something else first. |
+| Failing testcases + stack traces | `get_job_run_summary` | Test failures and cluster-operator status for one run. |
+| Raw artifact listing (build-log.txt, JUnit XML, gather dumps) | `get_prow_artifacts` | Lists files/dirs under a job run. |
+| One artifact's content | `get_prow_artifact_content` | Supports `tail`, `head`, `grep`; defaults to last 200 lines of `build-log.txt`. |
+| Recent runs + flake rate for a job | `get_prow_job_history` | Includes pending/aborted/presubmit/rehearsal runs — filter those out before computing a ratio. |
+| Every job run on a PR | `get_pr_impact` | Rate-limited to 20 requests/hour — don't call it speculatively. |
+| Pass/fail/flake rate for a specific test | `get_ci_test_report` | Cross-job view; use to confirm a flake across more than one build. |
+| Tests that recently started failing | `get_recent_test_failures` | Useful for "did this just start" without manually diffing history. |
+| Search logs/JUnit across CI for a string | `search_ci_logs` | For tracing an error message or test name to other jobs/builds. |
 
-python3 -I $S resolve <target>            # job, branch, base_sha, PR sha, result
-python3 -I $S steps   <target>            # per-step pass/fail -> the failing step
-python3 -I $S junit   <target>            # failing testcases + stack traces
-python3 -I $S ls      <target> --grep RE  # find artifacts (a build has ~8000)
-python3 -I $S cat     <target> <path>     # print one artifact
-python3 -I $S history <job> --pages 3     # runs + flake rate (20 runs/page)
-python3 -I $S jobs    <pr-url>            # every job on a PR, with results
-```
-
-`<target>` is a spyglass URL, a `gs://` URI, or `<job-name>/<build-id>`.
-Spyglass URLs naming the private bucket are fine — the script re-points them at
-the public one.
-
-Run it with `python3 -I` so the current directory is kept off `sys.path`.
+Accept a target in whatever form the tool wants (job name + build ID, or a
+Prow/spyglass URL) — do not hand-parse the URL yourself; let the MCP tool
+resolve it.
 
 Two **private GitLab repos cannot be submodules here** and live as gitignored
 clones under `projects/`. Check they are present and note their branch and
@@ -63,9 +66,9 @@ the end — the branch and flake verdict are useful before the root cause lands.
 
 ### 1. Input and workspace setup
 
-- Resolve the target: `resolve` for a job URL or build ID; `jobs <pr-url>` first
-  if given a PR, then pick the `FAIL` rows.
-- Record `job`, `build_id`, `result`, and from `repos[]`: the repo, `branch`
+- Resolve the target: `get_prow_job_run` for a job URL or build ID; `get_pr_impact`
+  first if given a PR, then pick the failing jobs.
+- Record `job`, `build_id`, `result`, and from the refs: the repo, `branch`
   (`base_ref`), `base_sha`, and the PR head `sha`. This is the commit trace.
 - `git submodule status` in the harness. A leading `+` means the checkout does
   not match the recorded pointer — note it, it changes what local greps mean.
@@ -74,7 +77,7 @@ the end — the branch and flake verdict are useful before the root cause lands.
 
 ### 2. Branch and submodule alignment
 
-- Take the branch from `clone-records.json` (`repos[].branch`), not from the job
+- Take the branch from `get_prow_job_run`'s refs (`base_ref`), not from the job
   name alone.
 - **Three naming conventions are in play** — translate, don't assume:
 
@@ -88,10 +91,10 @@ the end — the branch and flake verdict are useful before the root cause lands.
   `enterprise-*` prefix — if the user says that, ask what they mean. If a
   requested branch does not exist, say so instead of guessing.
 - The harness itself has only `main` — there is nothing to check out per release.
-  Align the submodule of **the repo the job actually built**, which is
-  `repos[].repo` from `resolve` — not the operator by default:
+  Align the submodule of **the repo the job actually built**, which is the repo
+  named in `get_prow_job_run`'s refs — not the operator by default:
 
-  | `repos[].repo` | submodule | default branch |
+  | repo | submodule | default branch |
   |---|---|---|
   | `openshift/insights-operator` | `projects/insights-operator` | `master` |
   | `openshift/insights-runtime-extractor` | `projects/insights-runtime-extractor` | `main` |
@@ -103,10 +106,10 @@ the end — the branch and flake verdict are useful before the root cause lands.
 
   An extractor `base_sha` does not exist in the operator repo, so pointing these
   commands at the wrong submodule fails outright or, worse, greps an unrelated
-  tree. If `repos[]` lists more than one repo, the one under test carries
-  `pulls[]` on a presubmit and otherwise matches the repo in the job name. If its
-  submodule cannot be initialised, say the source is unavailable and reason from
-  the artifacts — do not fall back to another repo's tree.
+  tree. If the job run lists more than one repo in refs, the one under test
+  carries a pull on a presubmit and otherwise matches the repo in the job name.
+  If its submodule cannot be initialised, say the source is unavailable and
+  reason from the artifacts — do not fall back to another repo's tree.
 
   ```bash
   # periodic / postsubmit: base_sha is the whole story
@@ -124,7 +127,7 @@ the end — the branch and flake verdict are useful before the root cause lands.
   ```bash
   git -C "$R" fetch origin <branch> pull/<pr-number>/head
   git -C "$R" checkout <base_sha>
-  git -C "$R" merge --no-edit <pull-sha>   # repos[].pulls[].sha
+  git -C "$R" merge --no-edit <pull-sha>   # PR head sha from the job run's refs
   ```
 
   A merge conflict here is itself a finding — CI hit the same one. Leave the
@@ -135,38 +138,41 @@ the end — the branch and flake verdict are useful before the root cause lands.
 
 ### 3. Job history and flake assessment
 
-```bash
-python3 -I $S history <job-name> --pages 3
-```
+Call `get_prow_job_history` for the job name, and `get_ci_test_report` for the
+specific failing test if you want a cross-job view. Filter out pending/aborted/
+rehearsal runs before computing a ratio.
 
-Classify from the pass/fail ratio *and* the `base=` / `head=` columns:
+Classify from the pass/fail ratio *and* each run's base/head refs:
 
 - **Flake** — failures interleaved with successes on the same or nearby base
-  SHAs. The script's heuristic verdict is a starting point only; confirm by
-  checking whether a *passing* run exists at the same commit as a failing one.
-  That is the strongest flake evidence there is — but on a presubmit the commit
-  is `base` **and** `head` together. Two runs of one PR share a base SHA while
-  testing different pushes, so a pass and a fail at the same `base=` prove
-  nothing; it is a retest of the same `head=` that does.
+  SHAs. Confirm by checking whether a *passing* run exists at the same commit as
+  a failing one. That is the strongest flake evidence there is — but on a
+  presubmit the commit is base **and** head together. Two runs of one PR share a
+  base SHA while testing different pushes, so a pass and a fail at the same base
+  prove nothing; it is a retest of the same head that does.
 - **Persistent regression** — every run fails from one base SHA onward. Name the
   first failing build and the base SHA it introduced.
 - **Infrastructure** — the failing step is a `gather-*`, `ipi-install-*` or
   `ipi-deprovision-*` step rather than `test`. Treat as infra, not product.
 
-Run `history` on the same test for a *sibling branch* too when deciding scope. If
-a failure starts on several branches at once with no operator commit in common,
-suspect the shared `ci/insights-operator-tests:latest` image — it is the same tag
-on every branch (see `references/ci-layout.md`).
+Call `get_prow_job_history` (or `get_ci_test_report`) for the same test on a
+*sibling branch* too when deciding scope. If a failure starts on several
+branches at once with no operator commit in common, suspect the shared
+`ci/insights-operator-tests:latest` image — it is the same tag on every branch
+(see `references/ci-layout.md`). `get_recent_test_failures` is a shortcut to
+confirm a test "just started" failing without manually diffing history.
 
 ### 4. Failure diagnosis and commit trace
 
-1. `steps <target>` → the failing step. If it is not `test`, the product may be
-   innocent. Steps marked `--` were aborted or skipped — on a timed-out build
-   most steps look like that; they are collateral, not the cause.
-2. `junit <target>` → failing testcase names and stack traces.
+1. `get_prow_job_run` → the failing step. If it is not `test`, the product may
+   be innocent. Steps marked aborted/skipped were collateral on a timed-out
+   build, not the cause.
+2. `get_job_run_summary` → failing testcase names and stack traces.
 3. Step log for timeouts and the surrounding context:
-   `cat <target> artifacts/<test-name>/test/build-log.txt | tail -200`.
-   For scheduling or step-timeout questions use `artifacts/ci-operator.log`.
+   `get_prow_artifact_content` on `artifacts/<test-name>/test/build-log.txt`
+   with `tail` set. For scheduling or step-timeout questions use
+   `artifacts/ci-operator.log` the same way. Use `get_prow_artifacts` first if
+   you need to find the exact path.
 4. Correlate with commits in the failure window:
 
    ```bash
